@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Сбор маршрута из JSON с нумерацией</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<script src="https://api-maps.yandex.ru/2.1/?apikey=ВАШ_API_КЛЮЧ&lang=ru_RU"></script>
+
+<style>
+html,body{margin:0;height:100%;font-family:Arial}
+#map{position:absolute;inset:0}
+
+#panel{
+    position:absolute;right:10px;top:10px;z-index:10;
+    width:380px;max-height:90%;
+    background:rgba(255,255,255,.95);
+    border-radius:8px;padding:8px;overflow:auto
+}
+
+#loadedPoints, #routeList{
+    max-height:180px; overflow-y:auto; border:1px solid #ccc; margin:5px 0; padding:2px;
+}
+
+#loadedPoints div, #routeList div{
+    padding:5px; border-bottom:1px solid #ddd; cursor:pointer;
+    white-space: pre-wrap;
+}
+#loadedPoints div:hover { background:#f0f0f0; }
+#routeList div.active { background:#d0f5d0; font-weight:bold; }
+
+.coord { margin-top:5px; font-size:14px; color:#333; }
+select, button { margin-top:5px; box-sizing:border-box; }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="panel">
+<b>Загрузка точек</b>
+<button onclick="loadJSON()">Загрузить JSON</button>
+<div id="loadedPoints"></div>
+
+<hr>
+<b>Маршрут</b>
+<div id="routeList"></div>
+
+<hr>
+<b>Выбор команды для добавления точки в маршрут</b>
+<select id="cmdSelect">
+    <option value="">(нет команд)</option>
+</select>
+<button id="addToRouteBtn" onclick="addRoutePointFromSelect()">Добавить в маршрут</button>
+
+<hr>
+<div class="coord" id="coord">Координаты: — , — | Азимут: —°</div>
+
+<button onclick="removePoint()">Удалить точку</button>
+<button onclick="exportRoute()">Экспорт маршрута JSON</button>
+</div>
+
+<script>
+let map;
+let loadedPoints = []; // точки из JSON
+let routePoints = []; // текущий маршрут
+let current = null;
+
+// Получаем ссылки на HTML элементы
+const loadedPointsDiv = document.getElementById("loadedPoints");
+const routeListDiv = document.getElementById("routeList");
+const coord = document.getElementById("coord");
+const cmdSelect = document.getElementById("cmdSelect");
+
+/* Инициализация карты */
+ymaps.ready(()=>{
+    map = new ymaps.Map("map", {
+        center:[56.3399,43.9332],
+        zoom:18,
+        type:'yandex#satellite',
+        controls:[]
+    });
+});
+
+/* SVG стрелки с номером */
+function arrowSVG(a,color,number){
+    const num = number ? number : '';
+    return 'data:image/svg+xml;utf8,'+encodeURIComponent(`
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">
+<g transform="rotate(${a},20,20)">
+<polygon points="20,2 28,30 20,24 12,30" fill="${color}"/>
+</g>
+<text x="20" y="25" font-size="14" text-anchor="middle" fill="white" font-weight="bold">${num}</text>
+</svg>`);
+}
+
+/* Загрузка JSON */
+function loadJSON(){
+    const input=document.createElement('input');
+    input.type='file';
+    input.accept='.json,application/json';
+    input.onchange = e=>{
+        const file=e.target.files[0];
+        if(!file) return;
+        const reader=new FileReader();
+        reader.onload=ev=>{
+            try{
+                const data=JSON.parse(ev.target.result);
+                loadedPoints.forEach(p=>map.geoObjects.remove(p.pm));
+                loadedPoints=[];
+                data.forEach(p=>{
+                    const obj={
+                        lat:p.lat,
+                        lon:p.lon,
+                        azimuth:p.azimuth,
+                        commands:p.commands,
+                        pm:null
+                    };
+                    obj.pm = new ymaps.Placemark([obj.lat,obj.lon], {}, {
+                        iconLayout:'default#image',
+                        iconImageHref: arrowSVG(obj.azimuth,'blue'),
+                        iconImageSize:[40,40],
+                        iconImageOffset:[-20,-20],
+                        draggable:false
+                    });
+                    obj.pm.events.add('click',()=>selectLoadedPoint(p));
+                    map.geoObjects.add(obj.pm);
+                    loadedPoints.push(obj);
+                });
+                renderLoadedPoints();
+                alert('JSON успешно загружен');
+            }catch(err){
+                alert('Ошибка при чтении JSON: '+err);
+            }
+        };
+        reader.readAsText(file,'UTF-8');
+    };
+    input.click();
+}
+
+/* Список загруженных точек */
+function renderLoadedPoints(){
+    loadedPointsDiv.innerHTML='';
+    loadedPoints.forEach((p)=>{
+        const d=document.createElement('div');
+        d.textContent=p.commands[0] || '(без команды)';
+        d.onclick=()=>selectLoadedPoint(p);
+        loadedPointsDiv.appendChild(d);
+    });
+}
+
+/* Выбор точки из загруженных (не добавляем сразу) */
+function selectLoadedPoint(p){
+    current = {
+        lat: p.lat,
+        lon: p.lon,
+        azimuth: p.azimuth,
+        pm:null,
+        commandsList: p.commands
+    };
+
+    // Заполняем select
+    cmdSelect.innerHTML = '';
+    current.commandsList.forEach((c,i)=>{
+        const opt = document.createElement('option');
+        opt.value = i;
+        opt.textContent = c;
+        cmdSelect.appendChild(opt);
+    });
+
+    updateCoord();
+}
+
+/* Добавление точки в маршрут из select */
+function addRoutePointFromSelect(){
+    if(!current) return;
+    const selectedIdx = parseInt(cmdSelect.value);
+    if(isNaN(selectedIdx) || !current.commandsList[selectedIdx]) return alert('Выберите команду');
+
+    const newPoint={
+        lat: current.lat,
+        lon: current.lon,
+        azimuth: current.azimuth,
+        command: current.commandsList[selectedIdx],
+        pm:null
+    };
+    routePoints.push(newPoint);
+
+    // Создаём метку с номером
+    newPoint.pm = new ymaps.Placemark([newPoint.lat,newPoint.lon], {}, {
+        iconLayout:'default#image',
+        iconImageHref: arrowSVG(newPoint.azimuth,'green', routePoints.length),
+        iconImageSize:[40,40],
+        iconImageOffset:[-20,-20],
+        draggable:true
+    });
+
+    newPoint.pm.events.add('click',()=>selectRoutePoint(newPoint));
+    newPoint.pm.events.add('geometrychange',()=>{
+        const coords=newPoint.pm.geometry.getCoordinates();
+        newPoint.lat=coords[0]; newPoint.lon=coords[1];
+        selectRoutePoint(newPoint);
+    });
+
+    map.geoObjects.add(newPoint.pm);
+    selectRoutePoint(newPoint);
+    renderRouteList();
+    updateRouteNumbers();
+}
+
+/* Обновление нумерации на метках */
+function updateRouteNumbers(){
+    routePoints.forEach((p,i)=>{
+        if(p.pm) p.pm.options.set('iconImageHref', arrowSVG(p.azimuth,'green',i+1));
+    });
+}
+
+/* Список маршрута */
+function renderRouteList(){
+    routeListDiv.innerHTML='';
+    routePoints.forEach((p,idx)=>{
+        const d=document.createElement('div');
+        d.textContent=`${idx+1}. ${p.command}`;
+        if(p===current) d.classList.add('active');
+        d.onclick=()=>selectRoutePoint(p);
+        routeListDiv.appendChild(d);
+    });
+}
+
+/* Выбор точки маршрута */
+function selectRoutePoint(p){
+    current=p;
+    renderRouteList();
+    updateMarker(p);
+    updateCoord();
+}
+
+/* Обновление маркера */
+function updateMarker(p){
+    if(!p) return;
+    p.pm.options.set('iconImageHref',arrowSVG(p.azimuth,p===current?'green':'green', routePoints.indexOf(p)+1));
+}
+
+/* Координаты + азимут */
+function updateCoord(){
+    if(!current){ coord.textContent="Координаты: — , — | Азимут: —°"; return; }
+    coord.textContent=`Координаты: ${current.lat.toFixed(6)} , ${current.lon.toFixed(6)} | Азимут: ${current.azimuth}°`;
+}
+
+/* Удаление точки */
+function removePoint(){
+    if(!current) return;
+    map.geoObjects.remove(current.pm);
+    routePoints=routePoints.filter(p=>p!==current);
+    current=null;
+    renderRouteList();
+    updateRouteNumbers();
+    updateCoord();
+}
+
+/* Экспорт маршрута */
+function exportRoute(){
+    const data=routePoints.map(p=>({
+        lat:p.lat, lon:p.lon, azimuth:p.azimuth, command:p.command
+    }));
+    const blob=new Blob(["\uFEFF"+JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download='route.json';
+    a.click();
+}
+</script>
+</body>
+</html>
