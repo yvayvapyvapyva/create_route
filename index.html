@@ -198,7 +198,6 @@ function updateRouteList(){
     route.forEach((p, idx)=>{
         const li = document.createElement('li');
         
-        // Текст маршрута кликабельный
         const span = document.createElement('span');
         span.textContent = `${idx+1}. ${p.command}`;
         span.style.cursor = 'pointer';
@@ -217,16 +216,15 @@ function updateRouteList(){
     });
 }
 
-
 function updatePlacemarkNumbers(){
     route.forEach((p, idx)=>{
-        p.placemark.options.set('iconImageHref', numberedArrowSVG(p.azimuth, idx+1));
+        p.placemark.options.set('iconImageHref', numberedArrowSVG(p.azimuth, idx+1, p.color || 'blue'));
     });
 }
 
 function removeRoutePoint(index){
     const removedPoint = route.splice(index, 1)[0];
-    removedPoint.placemark.options.set('iconImageHref', arrowSVG(removedPoint.azimuth));
+    removedPoint.placemark.options.set('iconImageHref', arrowSVG(removedPoint.azimuth, removedPoint.color || 'blue'));
     updateRouteList();
     updatePlacemarkNumbers();
 }
@@ -259,7 +257,8 @@ function selectCommand(command){
             lon: round6(coords[1]),
             azimuth: azimuth,
             command: command,
-            placemark: selectedPlacemark
+            placemark: selectedPlacemark,
+            color: selectedPlacemark.options.get('iconImageHrefColor') || 'blue'
         };
         route.push(routePoint);
         updateRouteList();
@@ -277,7 +276,8 @@ async function saveRouteToGist(){
         lat: p.lat,
         lon: p.lon,
         azimuth: p.azimuth,
-        command: p.command
+        command: p.command,
+        color: p.color
     })), null, 2);
 
     const files = {};
@@ -299,7 +299,7 @@ async function saveRouteToGist(){
 function saveRouteLocally(){
     if(route.length===0){ alert('Маршрут пустой'); return; }
     const data = JSON.stringify(route.map(p => ({
-        lat: p.lat, lon: p.lon, azimuth: p.azimuth, command: p.command
+        lat: p.lat, lon: p.lon, azimuth: p.azimuth, command: p.command, color: p.color
     })), null, 2);
     const blob = new Blob([data], {type:"application/json"});
     const url = URL.createObjectURL(blob);
@@ -327,15 +327,20 @@ async function loadPointsFromGist(){
         const gist = await resp.json();
         if(!gist.files[LOAD_FILENAME]) throw new Error('Файл не найден');
         const data = JSON.parse(gist.files[LOAD_FILENAME].content);
+        
         points.forEach(p=>map.geoObjects.remove(p));
         points=[];
+
         data.forEach(item=>{
+            const color = item.color || 'blue';
+
             const placemark = new ymaps.Placemark([round6(item.lat),round6(item.lon)], {}, {
                 iconLayout:'default#image',
-                iconImageHref: arrowSVG(item.azimuth||0),
+                iconImageHref: arrowSVG(item.azimuth||0, color),
                 iconImageSize:[40,40],
                 iconImageOffset:[-20,-20],
-                draggable:false
+                draggable:false,
+                iconImageHrefColor: color
             });
             placemark.itemCommands = item.commands||[];
             placemark.events.add('click',()=>showCommandBox(placemark.itemCommands, placemark));
@@ -365,7 +370,6 @@ function togglePanel(){
 // ------------------ START ------------------
 if(!GITHUB_TOKEN) showTokenPrompt();
 else initMap();
-
 </script>
 </body>
 </html>
