@@ -1,6 +1,360 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
+    <meta charset="utf-8">
+    <title>Редактор маршрутов + GitHub</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <script src="https://api-maps.yandex.ru/2.1/?apikey=YANDEX_API_KEY&lang=ru_RU"></script>
+    <style>
+        body, html { margin: 0; height: 100%; font-family: 'Inter', Arial, sans-serif; overflow: hidden; }
+        #map { position: absolute; inset: 0; }
+        
+        #panel { 
+            position: absolute; top: 10px; right: 10px; width: 300px; z-index: 1000;
+            background: rgba(255,255,255,0.9); padding: 15px; border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2); backdrop-filter: blur(10px);
+            transition: transform 0.3s ease, opacity 0.3s ease;
+            max-height: 90vh; overflow-y: auto;
+        }
+        
+        @media (max-width: 480px) {
+            #panel { width: auto; left: 10px; right: 10px; }
+        }
+
+        #panel.collapsed { transform: translateY(-150%); opacity: 0; pointer-events: none; }
+        
+        #togglePanel {
+            position: absolute; bottom: 25px; right: 20px; z-index: 1001;
+            width: 50px; height: 50px; border-radius: 25px; border: none;
+            background: #2f80ed; color: white; font-size: 24px; cursor: pointer;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center;
+        }
+
+        .info { background: #f4f4f7; padding: 10px; border-radius: 8px; margin-bottom: 8px; font-size: 12px; color: #444; line-height: 1.2; }
+        .row { display: flex; gap: 8px; margin-bottom: 8px; }
+        
+        button { 
+            flex: 1; cursor: pointer; border: none; border-radius: 8px; padding: 10px 5px; 
+            background: #2f80ed; color: white; font-weight: bold; font-family: inherit;
+            min-height: 44px; display: flex; align-items: center; justify-content: center;
+        }
+        button.danger { background: #e74c3c; }
+        button.secondary { background: #6c757d; }
+        button.icon-btn { font-size: 20px; background: #555; }
+        button.gh-btn { background: #24292e; } /* GitHub style */
+        
+        textarea, .gh-input { 
+            flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 8px; 
+            outline: none; font-size: 14px; font-family: inherit; width: 100%; box-sizing: border-box;
+        }
+        
+        #palette { display: flex; gap: 6px; margin-top: 5px; overflow-x: auto; padding: 5px 2px; }
+        #palette div { min-width: 28px; height: 28px; border-radius: 6px; cursor: pointer; border: 1px solid #ccc; flex-shrink: 0; box-sizing: border-box; }
+        #palette div.active { border: 3px solid #000; }
+
+        .cmd-bubble {
+            position: relative; background: #ffffff; border: 2px solid #333;
+            border-radius: 6px; padding: 4px 8px; font-size: 12px;
+            font-weight: bold; color: #000; box-shadow: 2px 2px 6px rgba(0,0,0,0.3);
+            display: inline-block; min-width: 20px; max-width: 200px; 
+            word-wrap: break-word; white-space: normal; line-height: 1.3;
+        }
+    </style>
+</head>
+<body>
+
+<div id="map"></div>
+<button id="togglePanel" onclick="document.getElementById('panel').classList.toggle('collapsed')">≡</button>
+
+<div id="panel">
+    <div class="row">
+        <button onclick="rotate(-10)">⟲ -10°</button>
+        <button onclick="rotate(10)">⟳ +10°</button>
+    </div>
+    <div class="row">
+        <textarea id="cmdInput" placeholder="Команда точки..." oninput="autoResize(this)" onblur="saveCmd()"></textarea>
+    </div>
+    
+    <div class="info" id="ghSettings">
+        <input type="password" id="ghToken" class="gh-input" placeholder="GitHub Token" style="margin-bottom: 5px;">
+        <input type="text" id="ghRepo" class="gh-input" placeholder="user/repository" style="margin-bottom: 5px;">
+        <input type="text" id="ghPath" class="gh-input" placeholder="folder/route.json">
+    </div>
+
+    <div class="info" id="coordsInfo">Определяем местоположение...</div>
+    <div class="row" style="margin-bottom: 5px;"><div id="palette"></div></div>
+    
+    <div class="row">
+        <button class="secondary" onclick="toggleLabels()" title="👁️">👁️</button>
+        <button class="danger" onclick="removePoint()" title="🗑️">🗑️</button>
+        <button class="icon-btn" onclick="exportJSON()" title="💾">💾</button>
+        <button class="icon-btn" onclick="importJSON()" title="📂">📂</button>
+    </div>
+    <div class="row">
+        <button class="gh-btn" onclick="loadFromGitHub()">📂 GH</button>
+        <button class="gh-btn" onclick="saveToGitHub()">💾 GH</button>
+    </div>
+</div>
+
+<script>
+let map, points = [], current = null, showLabels = false, userMarker = null, currentFileSha = null;
+const COLOR_PALETTE = ['Gold', 'blue', 'red', 'Lime', 'Fuchsia', 'purple', 'Silver', 'Aqua'];
+const DEFAULT_CENTER = [56.3399, 43.9332];
+
+ymaps.ready(() => {
+    map = new ymaps.Map("map", { 
+        center: DEFAULT_CENTER, 
+        zoom: 18, 
+        type: 'yandex#satellite', 
+        controls: [] 
+    });
+    
+    map.events.add('click', e => addPoint(e.get('coords')));
+    
+    const pal = document.getElementById('palette');
+    COLOR_PALETTE.forEach(c => {
+        const d = document.createElement('div');
+        d.style.background = c;
+        d.dataset.color = c;
+        d.onclick = () => { if(current) { current.color = c; updateMarkers(); updatePaletteUI(); } };
+        pal.appendChild(d);
+    });
+
+    startInitialGeolocation();
+});
+
+function startInitialGeolocation() {
+    if ("geolocation" in navigator) {
+        navigator.geolocation.getCurrentPosition((position) => {
+            const coords = [position.coords.latitude, position.coords.longitude];
+            map.setCenter(coords);
+            document.getElementById('coordsInfo').innerText = "Нажмите на карту для точки";
+        }, (err) => {
+            document.getElementById('coordsInfo').innerText = "GPS недоступен. Выберите точку.";
+        });
+
+        navigator.geolocation.watchPosition((position) => {
+            const coords = [position.coords.latitude, position.coords.longitude];
+            if (!userMarker) {
+                userMarker = new ymaps.Placemark(coords, {}, { preset: 'islands#geolocationIcon', zIndex: 2000 });
+                map.geoObjects.add(userMarker);
+            } else {
+                userMarker.geometry.setCoordinates(coords);
+            }
+        }, null, { enableHighAccuracy: true });
+    }
+}
+
+function autoResize(el) { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; }
+
+function getIcon(azimuth, colorName, isSelected, id) {
+    const fill = colorName || 'Gold';
+    const stroke = isSelected ? '#2ecc71' : '#000';
+    return 'data:image/svg+xml;utf8,' + encodeURIComponent(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">
+            <g transform="rotate(${azimuth},20,20)">
+                <polygon points="20,2 35,35 20,26 5,35" fill="${fill}" stroke="${stroke}" stroke-width="${isSelected?3:1.5}"/>
+            </g>
+            <circle cx="20" cy="20" r="9" fill="white" stroke="${fill}" stroke-width="2"/>
+            <text x="20" y="24" font-size="11" font-family="Arial" font-weight="900" text-anchor="middle" fill="black">${id}</text>
+        </svg>`
+    );
+}
+
+function addPoint(coords) {
+    document.getElementById('panel').classList.remove('collapsed');
+    const p = {
+        id: points.length + 1,
+        lat: coords[0].toFixed(6), lon: coords[1].toFixed(6),
+        azimuth: 0, color: 'Gold', command: '', pm: null
+    };
+
+    p.pm = new ymaps.Placemark(coords, { iconContent: "" }, {
+        iconLayout: 'default#imageWithContent', 
+        iconImageSize: [40, 40], iconImageOffset: [-20, -20], draggable: true,
+        iconImageHref: getIcon(0, 'Gold', false, p.id),
+        iconContentOffset: [25, -10],
+        iconContentLayout: ymaps.templateLayoutFactory.createClass(
+            '{% if properties.iconContent %}<div class="cmd-bubble">$[properties.iconContent]</div>{% endif %}'
+        )
+    });
+
+    p.pm.events.add('click', () => selectPoint(p));
+    p.pm.events.add('dragend', () => {
+        const c = p.pm.geometry.getCoordinates();
+        p.lat = c[0].toFixed(6); p.lon = c[1].toFixed(6);
+        updateUI();
+    });
+
+    map.geoObjects.add(p.pm);
+    points.push(p);
+    selectPoint(p);
+}
+
+function updatePaletteUI() {
+    const divs = document.querySelectorAll('#palette div');
+    divs.forEach(d => {
+        d.classList.toggle('active', current && d.dataset.color === current.color);
+    });
+}
+
+function selectPoint(p) {
+    saveCmd();
+    current = p;
+    const input = document.getElementById('cmdInput');
+    input.value = p.command;
+    autoResize(input);
+    updateMarkers();
+    updateUI();
+    updatePaletteUI();
+}
+
+function saveCmd() { 
+    if (current) { 
+        current.command = document.getElementById('cmdInput').value.trim(); 
+        if(showLabels) current.pm.properties.set('iconContent', current.command);
+    } 
+}
+
+function toggleLabels() {
+    showLabels = !showLabels;
+    points.forEach(p => p.pm.properties.set('iconContent', showLabels ? p.command : ""));
+}
+
+function reindexPoints() {
+    points.forEach((p, index) => p.id = index + 1);
+    updateMarkers();
+    updateUI();
+}
+
+function updateMarkers() {
+    points.forEach(p => p.pm.options.set('iconImageHref', getIcon(p.azimuth, p.color, p === current, p.id)));
+}
+
+function updateUI() {
+    const info = document.getElementById('coordsInfo');
+    if (!current) { info.innerText = "Выберите точку"; return; }
+    info.innerHTML = `<b>ID:${current.id}</b> | ${current.lat}, ${current.lon} | <b>∠${current.azimuth}°</b>`;
+}
+
+function rotate(deg) {
+    if (!current) return;
+    current.azimuth = (current.azimuth + deg + 360) % 360;
+    updateMarkers(); updateUI();
+}
+
+function removePoint() {
+    if (!current) return;
+    map.geoObjects.remove(current.pm);
+    points = points.filter(p => p !== current);
+    current = null;
+    reindexPoints();
+    updatePaletteUI();
+}
+
+// GitHub Functions
+async function loadFromGitHub() {
+    const token = document.getElementById('ghToken').value;
+    const repo = document.getElementById('ghRepo').value;
+    const path = document.getElementById('ghPath').value;
+
+    if (!token || !repo || !path) return alert("Введите Token, Repo и Path");
+
+    try {
+        const response = await fetch(`https://api.github.com/repos/${repo}/contents/${path}`, {
+            headers: { 'Authorization': `token ${token}`, 'Cache-Control': 'no-cache' }
+        });
+        if (!response.ok) throw new Error("Файл не найден или ошибка доступа");
+        
+        const data = await response.json();
+        currentFileSha = data.sha;
+
+        const content = JSON.parse(decodeURIComponent(escape(atob(data.content))));
+        
+        points.forEach(p => map.geoObjects.remove(p.pm));
+        points = [];
+        
+        content.forEach(d => {
+            addPoint([parseFloat(d.lat), parseFloat(d.lon)]);
+            const last = points[points.length - 1];
+            last.azimuth = d.azimuth || 0; 
+            last.color = d.color || 'Gold'; 
+            last.command = d.command || '';
+        });
+        reindexPoints();
+        alert("Загружено успешно!");
+    } catch (e) {
+        alert("Ошибка: " + e.message);
+    }
+}
+
+async function saveToGitHub() {
+    saveCmd();
+    const token = document.getElementById('ghToken').value;
+    const repo = document.getElementById('ghRepo').value;
+    const path = document.getElementById('ghPath').value;
+
+    if (!token || !repo || !path) return alert("Заполните данные GitHub");
+
+    const routeData = points.map(p => ({ 
+        id: p.id, lat: p.lat, lon: p.lon, azimuth: p.azimuth, color: p.color, command: p.command 
+    }));
+
+    const body = {
+        message: "Update route: " + new Date().toLocaleString(),
+        content: btoa(unescape(encodeURIComponent(JSON.stringify(routeData, null, 2)))),
+        sha: currentFileSha
+    };
+
+    try {
+        const response = await fetch(`https://api.github.com/repos/${repo}/contents/${path}`, {
+            method: 'PUT',
+            headers: { 'Authorization': `token ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        const resData = await response.json();
+        if (response.ok) {
+            currentFileSha = resData.content.sha;
+            alert("Сохранено в GitHub!");
+        } else {
+            throw new Error(resData.message);
+        }
+    } catch (e) {
+        alert("Ошибка сохранения: " + e.message);
+    }
+}
+
+function exportJSON() {
+    saveCmd();
+    const data = points.map(p => ({ id: p.id, lat: p.lat, lon: p.lon, azimuth: p.azimuth, color: p.color, command: p.command }));
+    const b = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+    const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = 'route.json'; a.click();
+}
+
+function importJSON() {
+    const input = document.createElement('input'); input.type = 'file';
+    input.onchange = e => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const data = JSON.parse(reader.result);
+            points.forEach(p => map.geoObjects.remove(p.pm));
+            points = [];
+            data.forEach(d => {
+                addPoint([parseFloat(d.lat), parseFloat(d.lon)]);
+                const last = points[points.length - 1];
+                last.azimuth = d.azimuth || 0; last.color = d.color || 'Gold'; last.command = d.command || '';
+            });
+            reindexPoints();
+        };
+        reader.readAsText(e.target.files[0]);
+    };
+    input.click();
+}
+</script>
+</body>
+</html><!DOCTYPE html>
+<html lang="ru">
+<head>
 <meta charset="utf-8">
 <title>Маршрут на карте с Gist</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
